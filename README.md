@@ -100,6 +100,7 @@ Features:
 - **Time-to-low-SOC countdown** — estimated runtime at the current draw until the pack (or each battery) hits a configurable cutoff (`monitor.low_soc_cutoff` in the config file, e.g. `15` for a 15% reserve; `0` for fully empty)
 - **Solar & battery savings** — optional, reads PV/grid power and your electricity rate from Home Assistant (`home_assistant` section in the config file) each poll and logs it to a local SQLite file, showing today's and lifetime $ saved from solar/battery vs. $ spent on grid. Battery savings are net of any grid-charging cost (via `ac_charge_mode_entity`) — charging from solar surplus is free, charging from the grid isn't
 - **Tracked circuits & monthly bill estimate** — track cost for any extra Home Assistant power sensor (EV charger, AC compressor, whole-home main panel, ...) via `home_assistant.circuits`; the circuit marked `is_main: true` also gets a projected monthly bill based on month-to-date cost
+- **History page** (`/history`, linked from the dashboard) — the same solar/battery/grid/circuit breakdown, over Today/Yesterday/This Week/This Month/Last 30 Days/This Year/All Time, plus a day-by-day table for trend-spotting
 
 ### Disable Web GUI
 

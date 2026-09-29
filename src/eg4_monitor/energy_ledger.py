@@ -14,10 +14,49 @@ import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Sentinel upper bound for open-ended ranges ("since X, through now and beyond").
+_FAR_FUTURE_UTC_ISO = "9999-12-31T23:59:59+00:00"
+_FAR_PAST_UTC_ISO = "0000-01-01T00:00:00+00:00"
+
+RANGE_PRESETS = [
+    ("today", "Today"),
+    ("yesterday", "Yesterday"),
+    ("this_week", "This Week"),
+    ("this_month", "This Month"),
+    ("last_30_days", "Last 30 Days"),
+    ("this_year", "This Year"),
+    ("all_time", "All Time"),
+]
+
+
+def resolve_range(preset: str) -> tuple:
+    """Resolve a range preset to (start_utc_iso, end_utc_iso), end exclusive."""
+    now_local = datetime.now().astimezone()
+    end_local = now_local
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if preset == "yesterday":
+        end_local = midnight
+        start_local = midnight - timedelta(days=1)
+    elif preset == "this_week":
+        start_local = midnight - timedelta(days=midnight.weekday())
+    elif preset == "this_month":
+        start_local = midnight.replace(day=1)
+    elif preset == "last_30_days":
+        start_local = midnight - timedelta(days=30)
+    elif preset == "this_year":
+        start_local = midnight.replace(month=1, day=1)
+    elif preset == "all_time":
+        return _FAR_PAST_UTC_ISO, _FAR_FUTURE_UTC_ISO
+    else:  # "today" or unknown
+        start_local = midnight
+
+    return start_local.astimezone(timezone.utc).isoformat(), end_local.astimezone(timezone.utc).isoformat()
 
 
 @dataclass
@@ -169,8 +208,8 @@ class EnergyLedger:
             )
             self._conn.commit()
 
-    def totals_since(self, since_utc_iso: str) -> EnergyTotals:
-        """Sum totals for rows with timestamp >= since_utc_iso (UTC ISO 8601)."""
+    def totals_between(self, start_utc_iso: str, end_utc_iso: str = _FAR_FUTURE_UTC_ISO) -> EnergyTotals:
+        """Sum totals for rows with start_utc_iso <= timestamp < end_utc_iso."""
         with self._lock:
             row = self._conn.execute(
                 """SELECT
@@ -182,8 +221,8 @@ class EnergyLedger:
                     COALESCE(SUM(solar_savings), 0),
                     COALESCE(SUM(battery_savings), 0),
                     COALESCE(SUM(grid_charge_cost), 0)
-                FROM energy_log WHERE timestamp >= ?""",
-                (since_utc_iso,),
+                FROM energy_log WHERE timestamp >= ? AND timestamp < ?""",
+                (start_utc_iso, end_utc_iso),
             ).fetchone()
         return EnergyTotals(
             grid_kwh=row[0], solar_kwh=row[1],
@@ -191,6 +230,10 @@ class EnergyLedger:
             grid_cost=row[4], solar_savings=row[5],
             battery_savings=row[6], grid_charge_cost=row[7],
         )
+
+    def totals_since(self, since_utc_iso: str) -> EnergyTotals:
+        """Sum totals for rows with timestamp >= since_utc_iso (UTC ISO 8601)."""
+        return self.totals_between(since_utc_iso)
 
     def totals_today(self) -> EnergyTotals:
         """Totals since local midnight."""
@@ -202,7 +245,32 @@ class EnergyLedger:
 
     def totals_lifetime(self) -> EnergyTotals:
         """Totals across every recorded interval."""
-        return self.totals_since("0000-01-01T00:00:00+00:00")
+        return self.totals_since(_FAR_PAST_UTC_ISO)
+
+    def daily_totals(self, start_utc_iso: str, end_utc_iso: str) -> List[dict]:
+        """Per-local-day breakdown of solar/battery/grid totals within [start, end)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT timestamp, solar_kwh, grid_kwh, battery_discharge_kwh, battery_charge_kwh,
+                    grid_cost, solar_savings, battery_savings, grid_charge_cost
+                FROM energy_log WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp""",
+                (start_utc_iso, end_utc_iso),
+            ).fetchall()
+
+        buckets = {}
+        for row in rows:
+            local_date = datetime.fromisoformat(row[0]).astimezone().date().isoformat()
+            b = buckets.setdefault(local_date, EnergyTotals())
+            b.solar_kwh += row[1]
+            b.grid_kwh += row[2]
+            b.battery_discharge_kwh += row[3]
+            b.battery_charge_kwh += row[4]
+            b.grid_cost += row[5]
+            b.solar_savings += row[6]
+            b.battery_savings += row[7]
+            b.grid_charge_cost += row[8]
+
+        return [{"date": d, **buckets[d].to_dict()} for d in sorted(buckets)]
 
     def latest(self) -> Optional[dict]:
         """The most recently recorded interval's raw inputs, or None if empty."""
@@ -247,14 +315,17 @@ class EnergyLedger:
             )
             self._conn.commit()
 
-    def circuit_totals_since(self, name: str, since_utc_iso: str) -> CircuitTotals:
+    def circuit_totals_between(self, name: str, start_utc_iso: str, end_utc_iso: str = _FAR_FUTURE_UTC_ISO) -> CircuitTotals:
         with self._lock:
             row = self._conn.execute(
                 """SELECT COALESCE(SUM(kwh), 0), COALESCE(SUM(cost), 0)
-                FROM circuit_log WHERE circuit_name = ? AND timestamp >= ?""",
-                (name, since_utc_iso),
+                FROM circuit_log WHERE circuit_name = ? AND timestamp >= ? AND timestamp < ?""",
+                (name, start_utc_iso, end_utc_iso),
             ).fetchone()
         return CircuitTotals(kwh=row[0], cost=row[1])
+
+    def circuit_totals_since(self, name: str, since_utc_iso: str) -> CircuitTotals:
+        return self.circuit_totals_between(name, since_utc_iso)
 
     def circuit_totals_today(self, name: str) -> CircuitTotals:
         return self.circuit_totals_since(name, _local_midnight_utc_iso())
@@ -263,7 +334,25 @@ class EnergyLedger:
         return self.circuit_totals_since(name, _local_month_start_utc_iso())
 
     def circuit_totals_lifetime(self, name: str) -> CircuitTotals:
-        return self.circuit_totals_since(name, "0000-01-01T00:00:00+00:00")
+        return self.circuit_totals_since(name, _FAR_PAST_UTC_ISO)
+
+    def circuit_daily_totals(self, name: str, start_utc_iso: str, end_utc_iso: str) -> List[dict]:
+        """Per-local-day kWh/cost breakdown for a named circuit within [start, end)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT timestamp, kwh, cost FROM circuit_log
+                WHERE circuit_name = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp""",
+                (name, start_utc_iso, end_utc_iso),
+            ).fetchall()
+
+        buckets = {}
+        for ts, kwh, cost in rows:
+            local_date = datetime.fromisoformat(ts).astimezone().date().isoformat()
+            b = buckets.setdefault(local_date, CircuitTotals())
+            b.kwh += kwh
+            b.cost += cost
+
+        return [{"date": d, **buckets[d].to_dict()} for d in sorted(buckets)]
 
     def circuit_latest(self, name: str) -> Optional[dict]:
         """The most recently recorded power reading for a named circuit."""

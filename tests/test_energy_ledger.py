@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from eg4_monitor.energy_ledger import EnergyLedger
+from eg4_monitor.energy_ledger import EnergyLedger, resolve_range, RANGE_PRESETS
 
 
 @pytest.fixture
@@ -263,3 +263,110 @@ class TestSchemaMigration:
             assert totals.battery_charge_kwh == pytest.approx(0.1)
         finally:
             ledger.close()
+
+
+class TestResolveRange:
+
+    def test_returns_all_known_presets(self):
+        for key, _ in RANGE_PRESETS:
+            start, end = resolve_range(key)
+            assert isinstance(start, str)
+            assert isinstance(end, str)
+            assert start <= end
+
+    def test_today_starts_at_local_midnight(self):
+        start, _ = resolve_range("today")
+        start_dt = datetime.fromisoformat(start).astimezone()
+        assert (start_dt.hour, start_dt.minute, start_dt.second) == (0, 0, 0)
+
+    def test_yesterday_ends_where_today_starts(self):
+        today_start, _ = resolve_range("today")
+        _, yesterday_end = resolve_range("yesterday")
+        assert yesterday_end == today_start
+
+    def test_yesterday_spans_exactly_one_day(self):
+        start, end = resolve_range("yesterday")
+        assert datetime.fromisoformat(end) - datetime.fromisoformat(start) == timedelta(days=1)
+
+    def test_this_month_starts_on_the_first(self):
+        start, _ = resolve_range("this_month")
+        assert datetime.fromisoformat(start).astimezone().day == 1
+
+    def test_this_week_starts_on_monday(self):
+        start, _ = resolve_range("this_week")
+        assert datetime.fromisoformat(start).astimezone().weekday() == 0
+
+    def test_all_time_spans_everything(self):
+        start, end = resolve_range("all_time")
+        assert start < "1000-01-01"
+        assert end > "9000-01-01"
+
+    def test_unknown_preset_falls_back_to_today(self):
+        # Compare start only — "end" is "now" and may drift a few microseconds between calls
+        assert resolve_range("bogus")[0] == resolve_range("today")[0]
+
+
+class TestTotalsBetween:
+
+    def test_excludes_data_outside_range(self, ledger):
+        ledger.record(pv_power=1000.0, grid_power=0.0, battery_power=0.0, rate=0.30, interval_seconds=3600)
+        future_start = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        future_end = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        totals = ledger.totals_between(future_start, future_end)
+        assert totals.solar_kwh == 0.0
+
+    def test_includes_data_inside_range(self, ledger):
+        ledger.record(pv_power=1000.0, grid_power=0.0, battery_power=0.0, rate=0.30, interval_seconds=3600)
+        start = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        totals = ledger.totals_between(start, end)
+        assert totals.solar_kwh == pytest.approx(1.0)
+
+    def test_end_boundary_excludes_later_rows(self, ledger):
+        ledger.record(pv_power=1000.0, grid_power=0.0, battery_power=0.0, rate=0.30, interval_seconds=3600)
+        start = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        end = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        totals = ledger.totals_between(start, end)
+        assert totals.solar_kwh == 0.0
+
+
+class TestDailyTotals:
+
+    def test_single_day_bucket(self, ledger):
+        ledger.record(pv_power=1000.0, grid_power=0.0, battery_power=-500.0, rate=0.30, interval_seconds=3600)
+        start = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        daily = ledger.daily_totals(start, end)
+        assert len(daily) == 1
+        assert daily[0]["date"] == datetime.now().astimezone().date().isoformat()
+        assert daily[0]["solar_savings"] == pytest.approx(0.30)
+
+    def test_empty_range_returns_empty_list(self, ledger):
+        start = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        assert ledger.daily_totals(start, end) == []
+
+    def test_multiple_intervals_same_day_combine(self, ledger):
+        ledger.record(pv_power=1000.0, grid_power=0.0, battery_power=0.0, rate=0.30, interval_seconds=3600)
+        ledger.record(pv_power=500.0, grid_power=0.0, battery_power=0.0, rate=0.30, interval_seconds=3600)
+        start = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        daily = ledger.daily_totals(start, end)
+        assert len(daily) == 1
+        assert daily[0]["solar_kwh"] == pytest.approx(1.5)
+
+
+class TestCircuitDailyTotals:
+
+    def test_single_day_bucket(self, ledger):
+        ledger.record_circuit(name="EV Charger", power=7000.0, rate=0.30, interval_seconds=3600)
+        start = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        daily = ledger.circuit_daily_totals("EV Charger", start, end)
+        assert len(daily) == 1
+        assert daily[0]["kwh"] == pytest.approx(7.0)
+
+    def test_empty_range_returns_empty_list(self, ledger):
+        start = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        assert ledger.circuit_daily_totals("EV Charger", start, end) == []

@@ -7,10 +7,10 @@ import logging
 import threading
 from datetime import datetime
 from typing import List, Optional
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 
 from .battery import BatteryData, format_duration
-from .energy_ledger import EnergyLedger
+from .energy_ledger import EnergyLedger, RANGE_PRESETS, resolve_range
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +33,22 @@ class WebServer:
 
         # Register routes
         self.app.add_url_rule('/', 'index', self._index)
+        self.app.add_url_rule('/history', 'history', self._history)
         self.app.add_url_rule('/api/data', 'api_data', self._api_data)
         self.app.add_url_rule('/api/savings', 'api_savings', self._api_savings)
-        
+        self.app.add_url_rule('/api/history', 'api_history', self._api_history)
+
         # Disable Flask logging in production
         log = logging.getLogger('werkzeug')
         log.setLevel(logging.WARNING)
-    
+
     def _index(self):
         """Serve the main dashboard page."""
         return render_template_string(self._get_template())
+
+    def _history(self):
+        """Serve the historical usage/savings page."""
+        return render_template_string(self._get_history_template())
     
     def _api_data(self):
         """Return current battery data as JSON."""
@@ -78,6 +84,35 @@ class WebServer:
             'today': self.energy_ledger.totals_today().to_dict(),
             'lifetime': self.energy_ledger.totals_lifetime().to_dict(),
             'current': self.energy_ledger.latest(),
+            'circuits': circuits,
+        })
+
+    def _api_history(self):
+        """Return solar/battery/grid and circuit totals + daily breakdown for a range preset."""
+        if not self.energy_ledger:
+            return jsonify({'enabled': False})
+
+        preset = request.args.get('range', 'this_week')
+        valid_presets = {key for key, _ in RANGE_PRESETS}
+        if preset not in valid_presets:
+            preset = 'this_week'
+        start_iso, end_iso = resolve_range(preset)
+
+        circuits = []
+        for c in self.ha_circuits:
+            circuits.append({
+                'name': c.name,
+                'is_main': c.is_main,
+                'totals': self.energy_ledger.circuit_totals_between(c.name, start_iso, end_iso).to_dict(),
+                'daily': self.energy_ledger.circuit_daily_totals(c.name, start_iso, end_iso),
+            })
+
+        return jsonify({
+            'enabled': True,
+            'range': preset,
+            'presets': RANGE_PRESETS,
+            'totals': self.energy_ledger.totals_between(start_iso, end_iso).to_dict(),
+            'daily': self.energy_ledger.daily_totals(start_iso, end_iso),
             'circuits': circuits,
         })
 
@@ -226,6 +261,7 @@ class WebServer:
             <div class="status-bar">
                 <span><span class="status-dot" id="mqtt-status"></span> MQTT</span>
                 <span id="battery-count">0 Batteries</span>
+                <a href="/history" style="color:#00d4ff;text-decoration:none;">📊 History</a>
             </div>
         </header>
         <div class="summary-row">
@@ -371,6 +407,113 @@ class WebServer:
         updateSavings();
         setInterval(updateData, 5000);
         setInterval(updateSavings, 5000);
+    </script>
+</body>
+</html>'''
+
+    def _get_history_template(self):
+        """Return the historical usage/savings HTML page."""
+        return '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMS Monitor - History</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #eee; min-height: 100vh; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+        header h1 { font-size: 1.8em; color: #00d4ff; }
+        header a { color: #00d4ff; text-decoration: none; }
+        .range-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+        .range-btn { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #ccc; padding: 8px 14px; border-radius: 20px; cursor: pointer; font-size: 0.9em; }
+        .range-btn.active { background: rgba(0,212,255,0.2); border-color: #00d4ff; color: #00d4ff; }
+        .totals-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 20px; }
+        .tile { background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; text-align: center; }
+        .tile .label { font-size: 0.75em; color: #888; }
+        .tile .value { font-size: 1.4em; font-weight: 600; color: #00ff88; }
+        .tile.cost .value { color: #ffaa00; }
+        .section { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.1); }
+        .section h2 { font-size: 1.1em; color: #00d4ff; margin-bottom: 15px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
+        th { color: #888; font-weight: 600; font-size: 0.8em; text-transform: uppercase; }
+        .empty-row td { text-align: center; color: #888; padding: 20px; }
+        @media (max-width: 600px) {
+            header h1 { font-size: 1.4em; }
+            table { font-size: 0.8em; }
+            th, td { padding: 6px 4px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Historical Usage &amp; Savings</h1>
+            <a href="/">← Back to Dashboard</a>
+        </header>
+        <div class="range-bar" id="range-bar">
+            <button class="range-btn" data-range="today" onclick="loadHistory('today')">Today</button>
+            <button class="range-btn" data-range="yesterday" onclick="loadHistory('yesterday')">Yesterday</button>
+            <button class="range-btn" data-range="this_week" onclick="loadHistory('this_week')">This Week</button>
+            <button class="range-btn" data-range="this_month" onclick="loadHistory('this_month')">This Month</button>
+            <button class="range-btn" data-range="last_30_days" onclick="loadHistory('last_30_days')">Last 30 Days</button>
+            <button class="range-btn" data-range="this_year" onclick="loadHistory('this_year')">This Year</button>
+            <button class="range-btn" data-range="all_time" onclick="loadHistory('all_time')">All Time</button>
+        </div>
+        <div id="content">
+            <div class="section">
+                <h2>💰 Solar &amp; Battery Savings</h2>
+                <div class="totals-row">
+                    <div class="tile"><div class="label">Solar Saved</div><div class="value">$<span id="r-solar">--</span></div></div>
+                    <div class="tile"><div class="label">Battery Saved (net)</div><div class="value">$<span id="r-battery">--</span></div></div>
+                    <div class="tile cost"><div class="label">Grid Cost</div><div class="value">$<span id="r-grid">--</span></div></div>
+                    <div class="tile cost"><div class="label">Grid Charging Cost</div><div class="value">$<span id="r-charge">--</span></div></div>
+                    <div class="tile"><div class="label">Total Saved</div><div class="value">$<span id="r-total">--</span></div></div>
+                </div>
+                <table>
+                    <thead><tr><th>Date</th><th>Solar Saved</th><th>Battery Saved</th><th>Grid Cost</th><th>Total Saved</th></tr></thead>
+                    <tbody id="daily-body"></tbody>
+                </table>
+            </div>
+            <div id="circuits-history"></div>
+        </div>
+    </div>
+    <script>
+        function renderCircuitHistory(c) {
+            const rows = c.daily.length ? c.daily.map(d =>
+                `<tr><td>${d.date}</td><td>${d.kwh.toFixed(2)}</td><td>$${d.cost.toFixed(2)}</td></tr>`
+            ).join('') : '<tr class="empty-row"><td colspan="3">No data in this range</td></tr>';
+            return `<div class="section">
+                <h2>🔌 ${c.name}${c.is_main ? ' (Main)' : ''}</h2>
+                <div class="totals-row">
+                    <div class="tile"><div class="label">kWh</div><div class="value">${c.totals.kwh.toFixed(2)}</div></div>
+                    <div class="tile cost"><div class="label">Cost</div><div class="value">$${c.totals.cost.toFixed(2)}</div></div>
+                </div>
+                <table><thead><tr><th>Date</th><th>kWh</th><th>Cost</th></tr></thead><tbody>${rows}</tbody></table>
+            </div>`;
+        }
+        function loadHistory(preset) {
+            fetch('/api/history?range=' + preset).then(r => r.json()).then(data => {
+                if (!data.enabled) {
+                    document.getElementById('content').innerHTML = '<div class="section">Home Assistant integration not enabled.</div>';
+                    return;
+                }
+                document.querySelectorAll('.range-btn').forEach(b => b.classList.toggle('active', b.dataset.range === data.range));
+                const t = data.totals;
+                document.getElementById('r-solar').textContent = t.solar_savings.toFixed(2);
+                document.getElementById('r-battery').textContent = t.battery_savings.toFixed(2);
+                document.getElementById('r-grid').textContent = t.grid_cost.toFixed(2);
+                document.getElementById('r-charge').textContent = t.grid_charge_cost.toFixed(2);
+                document.getElementById('r-total').textContent = t.total_savings.toFixed(2);
+                document.getElementById('daily-body').innerHTML = data.daily.length ? data.daily.map(d =>
+                    `<tr><td>${d.date}</td><td>$${d.solar_savings.toFixed(2)}</td><td>$${d.battery_savings.toFixed(2)}</td><td>$${d.grid_cost.toFixed(2)}</td><td>$${d.total_savings.toFixed(2)}</td></tr>`
+                ).join('') : '<tr class="empty-row"><td colspan="5">No data in this range</td></tr>';
+                document.getElementById('circuits-history').innerHTML = (data.circuits || []).map(renderCircuitHistory).join('');
+            }).catch(e => console.error(e));
+        }
+        loadHistory('this_week');
     </script>
 </body>
 </html>'''
