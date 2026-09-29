@@ -6,7 +6,7 @@ import os
 import sys
 from typing import Optional, List
 
-from .battery import BatteryData
+from .battery import BatteryData, format_duration
 
 
 class TerminalUI:
@@ -60,10 +60,11 @@ class TerminalUI:
         lines.append(f"║  SOC: {data.soc:5.1f}%  {soc_bar}   V: {data.voltage:5.2f}V   I: {data.current:+6.2f}A  ║")
         lines.append(f"║  Power: {data.power:+7.1f}W   Temp: {data.temperature:5.1f}°C   Remaining: {data.remaining_kwh:5.2f}kWh  ║")
         lines.append(f"║  Cells: {data.cell_min:.3f}V - {data.cell_max:.3f}V  Δ{data.cell_delta:4.0f}mV   SOH: {data.soh:.0f}%       ║")
+        lines.append(f"║  Time to low SOC: {format_duration(data.time_to_low_hours):<47} ║")
         
         return lines
     
-    def render(self, batteries: List[BatteryData], mqtt_connected: bool):
+    def render(self, batteries: List[BatteryData], mqtt_connected: bool, pack_time_to_low_hours: Optional[float] = None):
         """Render the UI with current battery data."""
         self.update_count += 1
         self.mqtt_status = "🟢 Connected" if mqtt_connected else "🔴 Disconnected"
@@ -96,6 +97,7 @@ class TerminalUI:
         alarm_count = sum(b.alarm_count for b in batteries)
         
         print(f"║  TOTALS: {online_count}/{len(batteries)} online   {total_kwh:6.2f} kWh   {total_power:+8.1f} W          ║")
+        print(f"║  Time to low SOC (pack): {format_duration(pack_time_to_low_hours):<41} ║")
         
         if alarm_count > 0:
             print(f"║  STATUS: 🔴 {alarm_count} ALARM(S) ACTIVE                                   ║")
@@ -112,12 +114,12 @@ class HeadlessUI:
     def __init__(self):
         self.update_count = 0
     
-    def render(self, batteries: List[BatteryData], mqtt_connected: bool):
+    def render(self, batteries: List[BatteryData], mqtt_connected: bool, pack_time_to_low_hours: Optional[float] = None):
         """Print a single status line per battery."""
         self.update_count += 1
-        
+
         mqtt = "MQTT:OK" if mqtt_connected else "MQTT:ERR"
-        
+
         for data in batteries:
             status = "ALARM" if data.alarms else "OK"
             print(
@@ -128,6 +130,9 @@ class HeadlessUI:
                 f"I:{data.current:+.1f}A "
                 f"T:{data.temperature:.0f}°C "
                 f"Δ:{data.cell_delta:.0f}mV "
+                f"TTL:{format_duration(data.time_to_low_hours)} "
                 f"{mqtt} "
                 f"[{status}]"
             )
+
+        print(f"  Pack time to low SOC: {format_duration(pack_time_to_low_hours)}")

@@ -46,7 +46,7 @@ from pymodbus.server import ModbusTcpServer
 from pymodbus.server.server import SimDevice
 from pymodbus.simulator.simdata import SimData, DataType
 
-from .battery import BatteryData
+from .battery import BatteryData, estimate_hours_to_target
 
 logger = logging.getLogger(__name__)
 
@@ -88,25 +88,29 @@ def _alarm_bitmask(alarms: List[str]) -> int:
     return mask
 
 
-def aggregate(batteries: List[BatteryData]) -> dict:
+def aggregate(batteries: List[BatteryData], target_soc: float = 0.0) -> dict:
     """Combine all online battery data into a single virtual pack."""
     online = [b for b in batteries if b.online]
     if not online:
         return {}
 
-    total_cap = sum(b.full_capacity for b in online) or 1.0
+    pack_full_capacity = sum(b.full_capacity for b in online)
+    total_cap = pack_full_capacity or 1.0
+    pack_current = sum(b.current for b in online)
+    pack_remaining_ah = sum(b.remaining_ah for b in online)
 
     return {
         "voltage":         sum(b.voltage for b in online) / len(online),
-        "current":         sum(b.current for b in online),
+        "current":         pack_current,
         "power":           sum(b.power   for b in online),
         "temperature":     max(b.temperature for b in online),
         "soc":             sum(b.soc * (b.full_capacity / total_cap) for b in online),
         "soh":             min(b.soh for b in online),
-        "remaining_ah":    sum(b.remaining_ah    for b in online),
+        "remaining_ah":    pack_remaining_ah,
         "design_capacity": sum(b.design_capacity for b in online),
         "full_capacity":   sum(b.full_capacity   for b in online),
         "remaining_kwh":   sum(b.remaining_kwh   for b in online),
+        "time_to_low_hours": estimate_hours_to_target(pack_remaining_ah, pack_full_capacity, pack_current, target_soc),
         "cycle_count":     max((getattr(b, "cycle_count", 0) or 0) for b in online),
         "max_voltage":     min((b.max_voltage for b in online if b.max_voltage), default=0.0),
         "max_current":     sum(b.max_current  for b in online if b.max_current),

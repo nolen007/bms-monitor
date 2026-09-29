@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List
 from flask import Flask, render_template_string, jsonify
 
-from .battery import BatteryData
+from .battery import BatteryData, format_duration
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +18,14 @@ logger = logging.getLogger(__name__)
 class WebServer:
     """Flask web server for battery monitoring GUI."""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 5000):
+    def __init__(self, host: str = "0.0.0.0", port: int = 5000, low_soc_cutoff: float = 0.0):
         self.host = host
         self.port = port
+        self.low_soc_cutoff = low_soc_cutoff
         self.app = Flask(__name__)
         self.batteries: List[BatteryData] = []
         self.mqtt_connected: bool = False
+        self.pack_time_to_low_hours: float = None
         self._thread = None
         
         # Register routes
@@ -43,12 +45,16 @@ class WebServer:
         return jsonify({
             'batteries': [b.to_dict() for b in self.batteries],
             'mqtt_connected': self.mqtt_connected,
+            'low_soc_cutoff': self.low_soc_cutoff,
+            'pack_time_to_low_hours': self.pack_time_to_low_hours,
+            'pack_time_to_low': format_duration(self.pack_time_to_low_hours),
         })
-    
-    def update_data(self, batteries: List[BatteryData], mqtt_connected: bool = False):
+
+    def update_data(self, batteries: List[BatteryData], mqtt_connected: bool = False, pack_time_to_low_hours: float = None):
         """Update the current battery data."""
         self.batteries = batteries
         self.mqtt_connected = mqtt_connected
+        self.pack_time_to_low_hours = pack_time_to_low_hours
     
     def start(self):
         """Start the web server in a background thread."""
@@ -181,6 +187,7 @@ class WebServer:
             <div class="summary-card"><div class="label">Total Power</div><div class="value"><span id="total-power">--</span><span class="unit"> W</span></div></div>
             <div class="summary-card"><div class="label">Average SOC</div><div class="value"><span id="avg-soc">--</span><span class="unit"> %</span></div></div>
             <div class="summary-card"><div class="label">Online</div><div class="value"><span id="online-count">--</span></div></div>
+            <div class="summary-card"><div class="label" id="ttl-label">Time to Low SOC</div><div class="value" id="ttl-pack">--</div></div>
         </div>
         <div class="battery-grid" id="battery-grid"></div>
         <div class="last-update">Last updated: <span id="timestamp">--</span></div>
@@ -211,7 +218,7 @@ class WebServer:
                 <div class="metrics-row">
                     <div class="metric"><div class="label">Energy</div><div class="value">${b.remaining_kwh?.toFixed(2)||'--'}<span class="unit">kWh</span></div></div>
                     <div class="metric"><div class="label">SOH</div><div class="value">${b.soh?.toFixed(0)||'--'}<span class="unit">%</span></div></div>
-                    <div class="metric"><div class="label">SOH</div><div class="value">${b.soh||'--'}%</div></div>
+                    <div class="metric"><div class="label">Time to Low</div><div class="value" style="font-size:1.1em">${b.time_to_low||'--'}</div></div>
                     <div class="metric"><div class="label">Cell Δ</div><div class="value">${b.cell_delta?.toFixed(0)||'--'}<span class="unit">mV</span></div></div>
                 </div>
                 ${cells?`<div style="font-size:0.8em;color:#888;margin-top:10px;">Cells: ${b.cell_min?.toFixed(3)||'--'}V - ${b.cell_max?.toFixed(3)||'--'}V</div><div class="cell-grid">${cells}</div>`:''}
@@ -229,6 +236,8 @@ class WebServer:
                 const weightedSoc = totalCap ? online.reduce((s,b)=>s+(b.soc||0)*((b.full_capacity||0)/totalCap),0) : (online.reduce((s,b)=>s+(b.soc||0),0)/online.length);
                 document.getElementById('avg-soc').textContent = online.length ? weightedSoc.toFixed(1) : '--';
                 document.getElementById('online-count').textContent = online.length + '/' + batteries.length;
+                document.getElementById('ttl-label').textContent = data.low_soc_cutoff ? `Time to ${data.low_soc_cutoff}%` : 'Time to Empty';
+                document.getElementById('ttl-pack').textContent = data.pack_time_to_low || '--';
                 document.getElementById('battery-grid').innerHTML = batteries.map(createBatteryCard).join('');
                 document.getElementById('timestamp').textContent = batteries.length && batteries[0].timestamp ? new Date(batteries[0].timestamp).toLocaleString() : '--';
             }).catch(e=>console.error(e));

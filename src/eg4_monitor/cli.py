@@ -130,6 +130,12 @@ Examples:
         action="store_true",
         help="Output single JSON reading and exit",
     )
+    monitor_group.add_argument(
+        "--low-soc-cutoff",
+        type=float,
+        metavar="PCT",
+        help="SOC%% treated as 'empty' for the time-to-low-SOC countdown [default: 0]",
+    )
     
     # Web server settings
     web_group = parser.add_argument_group("Web Server Settings")
@@ -195,7 +201,9 @@ def build_config(args) -> Config:
         config.ui_enabled = False
     if args.debug:
         config.debug = True
-    
+    if args.low_soc_cutoff is not None:
+        config.low_soc_cutoff = args.low_soc_cutoff
+
     # Web settings
     if args.web_port:
         config.web_port = args.web_port

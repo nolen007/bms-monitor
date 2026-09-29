@@ -122,6 +122,7 @@ class MQTTPublisher:
             ("temperature", "Temperature", "°C", "temperature", "measurement"),
             ("remaining_kwh", "Remaining Energy", "kWh", "energy", "measurement"),
             ("remaining_ah", "Remaining Capacity", "Ah", None, "measurement"),
+            ("time_to_low_hours", "Time To Low SOC", "h", None, "measurement"),
             ("cell_min", "Cell Min Voltage", "V", "voltage", "measurement"),
             ("cell_max", "Cell Max Voltage", "V", "voltage", "measurement"),
             ("cell_delta", "Cell Delta", "mV", None, "measurement"),
@@ -198,6 +199,7 @@ class MQTTPublisher:
             ("temperature",    "Max Temperature",    "°C", "temperature", "measurement"),
             ("remaining_kwh",  "Total Remaining Energy",   "kWh", "energy", "measurement"),
             ("remaining_ah",   "Total Remaining Capacity", "Ah",  None,     "measurement"),
+            ("time_to_low_hours", "Time To Low SOC",        "h",   None,     "measurement"),
             ("full_capacity",  "Total Full Capacity",      "Ah",  None,     "measurement"),
             ("design_capacity","Total Design Capacity",    "Ah",  None,     "measurement"),
             ("cell_min",       "Cell Min Voltage",   "V",   "voltage",     "measurement"),
@@ -253,6 +255,7 @@ class MQTTPublisher:
             "temperature": round(data.temperature, 1),
             "remaining_kwh": round(data.remaining_kwh, 2),
             "remaining_ah": round(data.remaining_ah, 1),
+            "time_to_low_hours": round(data.time_to_low_hours, 2) if data.time_to_low_hours is not None else None,
             "cell_min": round(data.cell_min, 3),
             "cell_max": round(data.cell_max, 3),
             "cell_delta": round(data.cell_delta, 1),
@@ -291,7 +294,7 @@ class MQTTPublisher:
         if AGGREGATE_ID not in self._discovered_batteries:
             self._send_aggregate_discovery()
 
-        agg = aggregate(batteries)
+        agg = aggregate(batteries, self.config.low_soc_cutoff)
         if not agg:
             logger.debug("No online batteries — skipping aggregate publish")
             return
@@ -308,6 +311,7 @@ class MQTTPublisher:
             "temperature":     round(agg["temperature"], 1),
             "remaining_kwh":   round(agg["remaining_kwh"], 2),
             "remaining_ah":    round(agg["remaining_ah"], 1),
+            "time_to_low_hours": round(agg["time_to_low_hours"], 2) if agg["time_to_low_hours"] is not None else None,
             "full_capacity":   round(agg["full_capacity"], 1),
             "design_capacity": round(agg["design_capacity"], 1),
             "cell_min":        round(agg["cell_min"], 3),

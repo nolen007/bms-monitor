@@ -168,6 +168,10 @@ class BatteryData:
     full_capacity: float = 0.0
     remaining_ah: float = 0.0
     remaining_kwh: float = 0.0
+
+    # Runtime estimate: hours left at the current draw before hitting the
+    # configured low-SOC cutoff. None while charging/idle or capacity unknown.
+    time_to_low_hours: Optional[float] = None
     
     # Limits
     max_voltage: float = 0.0
@@ -202,6 +206,8 @@ class BatteryData:
             "full_capacity": self.full_capacity,
             "remaining_ah": round(self.remaining_ah, 1),
             "remaining_kwh": round(self.remaining_kwh, 2),
+            "time_to_low_hours": round(self.time_to_low_hours, 2) if self.time_to_low_hours is not None else None,
+            "time_to_low": format_duration(self.time_to_low_hours),
             "max_voltage": self.max_voltage,
             "max_current": self.max_current,
             "cell_count": self.cell_count,
@@ -225,6 +231,39 @@ def slugify(name: str) -> str:
     slug = re.sub(r'[^a-z0-9]+', '_', slug)
     slug = slug.strip('_')
     return slug
+
+
+def estimate_hours_to_target(
+    remaining_ah: float,
+    full_capacity: float,
+    current: float,
+    target_soc: float = 0.0,
+) -> Optional[float]:
+    """Estimate hours until capacity decays to target_soc at the current draw.
+
+    Current follows this project's convention: positive = charging,
+    negative = discharging. Returns None while charging/idle or when
+    capacity is unknown (nothing to count down).
+    """
+    if current >= 0 or full_capacity <= 0:
+        return None
+
+    target_ah = full_capacity * (target_soc / 100.0)
+    usable_ah = remaining_ah - target_ah
+    if usable_ah <= 0:
+        return 0.0
+
+    return usable_ah / abs(current)
+
+
+def format_duration(hours: Optional[float]) -> str:
+    """Format an hours value as 'Xh YYm', or '--' if unavailable."""
+    if hours is None:
+        return "--"
+
+    total_minutes = round(hours * 60)
+    h, m = divmod(total_minutes, 60)
+    return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
 class EG4ModbusReader:

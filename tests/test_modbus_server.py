@@ -144,6 +144,26 @@ class TestAggregate:
         assert "High Temperature"  in agg["alarms"]
         assert len(agg["alarms"]) == 2   # no duplicates
 
+    def test_time_to_low_default_target(self):
+        # 200Ah remaining, 280Ah capacity, -20A total draw -> 10h to 0%
+        b1 = _make_battery(name="A", full_capacity=140.0, remaining_ah=100.0, current=-10.0)
+        b2 = _make_battery(name="B", full_capacity=140.0, remaining_ah=100.0, current=-10.0)
+        agg = aggregate([b1, b2])
+        assert agg["time_to_low_hours"] == pytest.approx(10.0)
+
+    def test_time_to_low_with_cutoff(self):
+        # 280Ah capacity total, target 15% = 42Ah; 200Ah remaining, -20A -> (200-42)/20 = 7.9h
+        b1 = _make_battery(name="A", full_capacity=140.0, remaining_ah=100.0, current=-10.0)
+        b2 = _make_battery(name="B", full_capacity=140.0, remaining_ah=100.0, current=-10.0)
+        agg = aggregate([b1, b2], target_soc=15.0)
+        assert agg["time_to_low_hours"] == pytest.approx(7.9)
+
+    def test_time_to_low_none_while_charging(self):
+        b1 = _make_battery(name="A", current=10.0)
+        b2 = _make_battery(name="B", current=5.0)
+        agg = aggregate([b1, b2])
+        assert agg["time_to_low_hours"] is None
+
     def test_cell_voltages_concatenated(self):
         b1 = _make_battery(name="A", cell_count=4, cell_voltages=[3.2, 3.21, 3.19, 3.2])
         b2 = _make_battery(name="B", cell_count=4, cell_voltages=[3.22, 3.2, 3.18, 3.21])

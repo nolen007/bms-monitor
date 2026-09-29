@@ -63,6 +63,10 @@ monitor:
   ui_enabled: true
   # Enable debug logging
   debug: false
+  # SOC% treated as "empty" for the time-to-low-SOC countdown shown in the
+  # web GUI, terminal UI, and MQTT. E.g. 15 to stop at your inverter's
+  # low-voltage cutoff instead of 0%.
+  low_soc_cutoff: 0
 
 # Virtual Modbus TCP Server — Solar Assistant gateway
 # Exposes all batteries as a single combined Pylontech-compatible Modbus device.

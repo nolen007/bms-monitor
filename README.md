@@ -97,6 +97,7 @@ Features:
 - **All 16 cell voltages** with min/max highlighting
 - **Alarm display** when issues detected
 - **Mobile responsive** design
+- **Time-to-low-SOC countdown** — estimated runtime at the current draw until the pack (or each battery) hits a configurable cutoff (`monitor.low_soc_cutoff` in the config file, e.g. `15` for a 15% reserve; `0` for fully empty)
 
 ### Disable Web GUI
 

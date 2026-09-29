@@ -54,7 +54,10 @@ class Config:
     poll_interval: int = 30
     ui_enabled: bool = True
     debug: bool = False
-    
+    # SOC% treated as "empty" for the time-remaining countdown
+    # (e.g. 15 to stop at your inverter's low-voltage cutoff; 0 = fully empty)
+    low_soc_cutoff: float = 0.0
+
     def __post_init__(self):
         if self.batteries is None:
             # Default single battery for backwards compatibility
@@ -95,6 +98,7 @@ class Config:
         config.poll_interval = 30
         config.ui_enabled = True
         config.debug = False
+        config.low_soc_cutoff = 0.0
         
         # Battery settings - support both old single-battery and new multi-battery format
         if "batteries" in data:
@@ -153,6 +157,7 @@ class Config:
             config.poll_interval = monitor.get("interval", config.poll_interval)
             config.ui_enabled = monitor.get("ui_enabled", config.ui_enabled)
             config.debug = monitor.get("debug", config.debug)
+            config.low_soc_cutoff = monitor.get("low_soc_cutoff", config.low_soc_cutoff)
         
         return config
     
@@ -180,6 +185,7 @@ class Config:
         # Monitor settings
         config.poll_interval = int(os.getenv("EG4_POLL_INTERVAL", config.poll_interval))
         config.debug = os.getenv("EG4_DEBUG", "").lower() in ("true", "1", "yes")
+        config.low_soc_cutoff = float(os.getenv("EG4_LOW_SOC_CUTOFF", config.low_soc_cutoff))
         
         return config
     
@@ -212,6 +218,7 @@ class Config:
                 "interval": self.poll_interval,
                 "ui_enabled": self.ui_enabled,
                 "debug": self.debug,
+                "low_soc_cutoff": self.low_soc_cutoff,
             },
         }
     

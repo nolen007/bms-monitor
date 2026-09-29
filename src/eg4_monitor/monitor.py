@@ -7,9 +7,9 @@ import time
 from typing import Optional, List, Dict
 
 from .config import Config
-from .battery import BatteryData, EG4ModbusReader
+from .battery import BatteryData, EG4ModbusReader, estimate_hours_to_target
 from .canip import CANIPReader
-from .modbus_server import VirtualModbusServer
+from .modbus_server import VirtualModbusServer, aggregate
 from .mqtt import MQTTPublisher
 from .ui import TerminalUI, HeadlessUI
 from .web import WebServer
@@ -42,7 +42,11 @@ class BatteryMonitor:
         
         # Initialize web server if enabled
         if config.web_enabled:
-            self.web = WebServer(host=config.web_host, port=config.web_port)
+            self.web = WebServer(
+                host=config.web_host,
+                port=config.web_port,
+                low_soc_cutoff=config.low_soc_cutoff,
+            )
         
         # Initialize virtual Modbus server if enabled
         if config.modbus_server_enabled:
@@ -104,26 +108,31 @@ class BatteryMonitor:
         for reader in self.readers:
             # Poll battery
             data = reader.poll()
+            data.time_to_low_hours = estimate_hours_to_target(
+                data.remaining_ah, data.full_capacity, data.current, self.config.low_soc_cutoff
+            )
             self.battery_data[data.battery_id] = data
             all_data.append(data)
-            
+
             # Publish individual battery data to MQTT
             self.mqtt.publish(data)
-        
+
         # Publish aggregated data to its own MQTT topic
         self.mqtt.publish_aggregate(all_data)
-        
+
+        pack_time_to_low_hours = aggregate(all_data, self.config.low_soc_cutoff).get("time_to_low_hours")
+
         # Update web server data
         if self.web:
-            self.web.update_data(all_data, self.mqtt.connected)
-        
+            self.web.update_data(all_data, self.mqtt.connected, pack_time_to_low_hours)
+
         # Update virtual Modbus server registers
         if self.modbus_server:
             self.modbus_server.update(all_data)
-        
+
         # Update terminal UI
         if self.config.ui_enabled:
-            self.ui.render(all_data, self.mqtt.connected)
+            self.ui.render(all_data, self.mqtt.connected, pack_time_to_low_hours)
     
     def stop(self):
         """Stop the battery monitor."""
