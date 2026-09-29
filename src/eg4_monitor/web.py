@@ -62,6 +62,7 @@ class WebServer:
             'enabled': True,
             'today': self.energy_ledger.totals_today().to_dict(),
             'lifetime': self.energy_ledger.totals_lifetime().to_dict(),
+            'current': self.energy_ledger.latest(),
         })
 
     def update_data(self, batteries: List[BatteryData], mqtt_connected: bool = False, pack_time_to_low_hours: float = None):
@@ -216,6 +217,15 @@ class WebServer:
         </div>
         <div class="savings-section" id="savings-section" style="display:none">
             <h2>💰 Solar &amp; Battery Savings</h2>
+            <div class="savings-col" style="margin-bottom:15px">
+                <div class="period">Live Inputs <span id="inputs-asof" style="text-transform:none;letter-spacing:normal"></span></div>
+                <div class="savings-metrics">
+                    <div class="savings-metric"><div class="label">PV Power</div><div class="value"><span id="in-pv-power">--</span><span class="unit" style="font-size:0.6em"> W</span></div></div>
+                    <div class="savings-metric"><div class="label">Grid Power</div><div class="value"><span id="in-grid-power">--</span><span class="unit" style="font-size:0.6em"> W</span></div></div>
+                    <div class="savings-metric"><div class="label">Battery Power</div><div class="value"><span id="in-battery-power">--</span><span class="unit" style="font-size:0.6em"> W</span></div></div>
+                    <div class="savings-metric"><div class="label">Rate</div><div class="value">$<span id="in-rate">--</span><span class="unit" style="font-size:0.6em">/kWh</span></div></div>
+                </div>
+            </div>
             <div class="savings-columns">
                 <div class="savings-col">
                     <div class="period">Today</div>
@@ -302,12 +312,18 @@ class WebServer:
                 document.getElementById('life-battery-savings').textContent = data.lifetime.battery_savings.toFixed(2);
                 document.getElementById('life-grid-cost').textContent = data.lifetime.grid_cost.toFixed(2);
                 document.getElementById('life-total-savings').textContent = data.lifetime.total_savings.toFixed(2);
+                const cur = data.current;
+                document.getElementById('in-pv-power').textContent = cur?.pv_power?.toFixed(0) ?? '--';
+                document.getElementById('in-grid-power').textContent = cur?.grid_power?.toFixed(0) ?? '--';
+                document.getElementById('in-battery-power').textContent = cur?.battery_power?.toFixed(0) ?? '--';
+                document.getElementById('in-rate').textContent = cur?.rate?.toFixed(4) ?? '--';
+                document.getElementById('inputs-asof').textContent = cur?.timestamp ? '(' + new Date(cur.timestamp).toLocaleTimeString() + ')' : '';
             }).catch(e=>console.error(e));
         }
         updateData();
         updateSavings();
         setInterval(updateData, 5000);
-        setInterval(updateSavings, 30000);
+        setInterval(updateSavings, 5000);
     </script>
 </body>
 </html>'''

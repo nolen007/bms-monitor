@@ -85,3 +85,25 @@ class TestEnergyTotalsToDict:
         d = ledger.totals_lifetime().to_dict()
         assert d["total_savings"] == pytest.approx(d["solar_savings"] + d["battery_savings"])
         assert d["grid_cost"] == pytest.approx(0.15)
+
+
+class TestLatest:
+
+    def test_empty_ledger_returns_none(self, ledger):
+        assert ledger.latest() is None
+
+    def test_returns_most_recent_raw_inputs(self, ledger):
+        ledger.record(pv_power=500.0, grid_power=100.0, battery_power=-200.0, rate=0.10, interval_seconds=30)
+        ledger.record(pv_power=800.0, grid_power=0.0, battery_power=-900.0, rate=0.30, interval_seconds=30)
+        latest = ledger.latest()
+        assert latest["pv_power"] == 800.0
+        assert latest["grid_power"] == 0.0
+        assert latest["battery_power"] == -900.0
+        assert latest["rate"] == 0.30
+        assert "timestamp" in latest
+
+    def test_skipped_interval_not_recorded_as_latest(self, ledger):
+        ledger.record(pv_power=500.0, grid_power=0.0, battery_power=-200.0, rate=0.10, interval_seconds=30)
+        ledger.record(pv_power=999.0, grid_power=0.0, battery_power=0.0, rate=None, interval_seconds=30)
+        latest = ledger.latest()
+        assert latest["pv_power"] == 500.0

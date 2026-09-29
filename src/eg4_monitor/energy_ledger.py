@@ -144,6 +144,23 @@ class EnergyLedger:
         """Totals across every recorded interval."""
         return self.totals_since("0000-01-01T00:00:00+00:00")
 
+    def latest(self) -> Optional[dict]:
+        """The most recently recorded interval's raw inputs, or None if empty."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT timestamp, pv_power, grid_power, battery_power, rate
+                FROM energy_log ORDER BY rowid DESC LIMIT 1"""
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "timestamp": row[0],
+            "pv_power": row[1],
+            "grid_power": row[2],
+            "battery_power": row[3],
+            "rate": row[4],
+        }
+
     def close(self):
         with self._lock:
             self._conn.close()
