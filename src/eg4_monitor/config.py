@@ -58,6 +58,15 @@ class Config:
     # (e.g. 15 to stop at your inverter's low-voltage cutoff; 0 = fully empty)
     low_soc_cutoff: float = 0.0
 
+    # Home Assistant integration (for solar/grid savings tracking)
+    ha_enabled: bool = False
+    ha_url: str = ""
+    ha_token: str = ""
+    ha_pv_entity: str = ""
+    ha_grid_entity: str = ""
+    ha_rate_entity: str = "input_number.electricity_rate"
+    energy_db_path: str = "energy_ledger.db"
+
     def __post_init__(self):
         if self.batteries is None:
             # Default single battery for backwards compatibility
@@ -99,6 +108,13 @@ class Config:
         config.ui_enabled = True
         config.debug = False
         config.low_soc_cutoff = 0.0
+        config.ha_enabled = False
+        config.ha_url = ""
+        config.ha_token = ""
+        config.ha_pv_entity = ""
+        config.ha_grid_entity = ""
+        config.ha_rate_entity = "input_number.electricity_rate"
+        config.energy_db_path = "energy_ledger.db"
         
         # Battery settings - support both old single-battery and new multi-battery format
         if "batteries" in data:
@@ -158,7 +174,18 @@ class Config:
             config.ui_enabled = monitor.get("ui_enabled", config.ui_enabled)
             config.debug = monitor.get("debug", config.debug)
             config.low_soc_cutoff = monitor.get("low_soc_cutoff", config.low_soc_cutoff)
-        
+
+        # Home Assistant integration (solar/grid savings tracking)
+        if "home_assistant" in data:
+            ha = data["home_assistant"]
+            config.ha_enabled = ha.get("enabled", config.ha_enabled)
+            config.ha_url = ha.get("url", config.ha_url)
+            config.ha_token = ha.get("token", config.ha_token)
+            config.ha_pv_entity = ha.get("pv_entity", config.ha_pv_entity)
+            config.ha_grid_entity = ha.get("grid_entity", config.ha_grid_entity)
+            config.ha_rate_entity = ha.get("rate_entity", config.ha_rate_entity)
+            config.energy_db_path = ha.get("db_path", config.energy_db_path)
+
         return config
     
     @classmethod
@@ -220,14 +247,24 @@ class Config:
                 "debug": self.debug,
                 "low_soc_cutoff": self.low_soc_cutoff,
             },
+            "home_assistant": {
+                "enabled": self.ha_enabled,
+                "url": self.ha_url,
+                "token": "***" if self.ha_token else "",
+                "pv_entity": self.ha_pv_entity,
+                "grid_entity": self.ha_grid_entity,
+                "rate_entity": self.ha_rate_entity,
+                "db_path": self.energy_db_path,
+            },
         }
-    
+
     def save(self, path: str | Path):
         """Save configuration to a YAML file."""
         path = Path(path)
         data = self.to_dict()
-        # Don't save masked password
+        # Don't save masked password/token
         data["mqtt"]["password"] = self.mqtt_password
+        data["home_assistant"]["token"] = self.ha_token
         
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False)

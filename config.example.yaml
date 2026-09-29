@@ -68,6 +68,20 @@ monitor:
   # low-voltage cutoff instead of 0%.
   low_soc_cutoff: 0
 
+# Home Assistant integration — powers the Solar & Battery Savings dashboard
+# card. Reads PV power, grid power, and your electricity rate from Home
+# Assistant each poll, and logs solar/battery-avoided grid cost to a local
+# SQLite file (db_path). Leave enabled: false to skip this entirely.
+home_assistant:
+  enabled: false
+  url: "https://your-home-assistant.example.com"
+  # Long-lived access token: HA profile -> Security -> Long-lived access tokens
+  token: "your-long-lived-access-token"
+  pv_entity: "sensor.inverter_pv_total_power"
+  grid_entity: "sensor.inverter_grid_power"
+  rate_entity: "input_number.electricity_rate"
+  db_path: "energy_ledger.db"
+
 # Virtual Modbus TCP Server — Solar Assistant gateway
 # Exposes all batteries as a single combined Pylontech-compatible Modbus device.
 # Solar Assistant setup:

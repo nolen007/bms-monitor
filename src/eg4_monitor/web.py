@@ -6,10 +6,11 @@ import json
 import logging
 import threading
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from flask import Flask, render_template_string, jsonify
 
 from .battery import BatteryData, format_duration
+from .energy_ledger import EnergyLedger
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +27,13 @@ class WebServer:
         self.batteries: List[BatteryData] = []
         self.mqtt_connected: bool = False
         self.pack_time_to_low_hours: float = None
+        self.energy_ledger: Optional[EnergyLedger] = None
         self._thread = None
-        
+
         # Register routes
         self.app.add_url_rule('/', 'index', self._index)
         self.app.add_url_rule('/api/data', 'api_data', self._api_data)
+        self.app.add_url_rule('/api/savings', 'api_savings', self._api_savings)
         
         # Disable Flask logging in production
         log = logging.getLogger('werkzeug')
@@ -48,6 +51,17 @@ class WebServer:
             'low_soc_cutoff': self.low_soc_cutoff,
             'pack_time_to_low_hours': self.pack_time_to_low_hours,
             'pack_time_to_low': format_duration(self.pack_time_to_low_hours),
+        })
+
+    def _api_savings(self):
+        """Return today's and lifetime solar/battery savings vs. grid cost."""
+        if not self.energy_ledger:
+            return jsonify({'enabled': False})
+
+        return jsonify({
+            'enabled': True,
+            'today': self.energy_ledger.totals_today().to_dict(),
+            'lifetime': self.energy_ledger.totals_lifetime().to_dict(),
         })
 
     def update_data(self, batteries: List[BatteryData], mqtt_connected: bool = False, pack_time_to_low_hours: float = None):
@@ -138,6 +152,17 @@ class WebServer:
         .alarm-item { color: #ff6b6b; padding: 3px 0; font-size: 0.9em; }
         .alarm-item::before { content: "⚠️ "; }
         .last-update { text-align: center; color: #666; margin-top: 30px; font-size: 0.85em; }
+        .savings-section { margin-bottom: 30px; }
+        .savings-section h2 { font-size: 1.1em; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; text-align: center; }
+        .savings-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; }
+        .savings-col { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; border: 1px solid rgba(255,255,255,0.1); }
+        .savings-col .period { text-align: center; font-size: 0.8em; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+        .savings-metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .savings-metric { background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px; text-align: center; }
+        .savings-metric .label { font-size: 0.7em; color: #888; }
+        .savings-metric .value { font-size: 1.3em; font-weight: 600; }
+        .savings-metric.saved .value { color: #00ff88; }
+        .savings-metric.cost .value { color: #ffaa00; }
         
         /* Tablet */
         @media (max-width: 1024px) {
@@ -188,6 +213,29 @@ class WebServer:
             <div class="summary-card"><div class="label">Average SOC</div><div class="value"><span id="avg-soc">--</span><span class="unit"> %</span></div></div>
             <div class="summary-card"><div class="label">Online</div><div class="value"><span id="online-count">--</span></div></div>
             <div class="summary-card"><div class="label" id="ttl-label">Time to Low SOC</div><div class="value" id="ttl-pack">--</div></div>
+        </div>
+        <div class="savings-section" id="savings-section" style="display:none">
+            <h2>💰 Solar &amp; Battery Savings</h2>
+            <div class="savings-columns">
+                <div class="savings-col">
+                    <div class="period">Today</div>
+                    <div class="savings-metrics">
+                        <div class="savings-metric saved"><div class="label">Solar Saved</div><div class="value">$<span id="today-solar-savings">--</span></div></div>
+                        <div class="savings-metric saved"><div class="label">Battery Saved</div><div class="value">$<span id="today-battery-savings">--</span></div></div>
+                        <div class="savings-metric cost"><div class="label">Grid Cost</div><div class="value">$<span id="today-grid-cost">--</span></div></div>
+                        <div class="savings-metric saved"><div class="label">Total Saved</div><div class="value">$<span id="today-total-savings">--</span></div></div>
+                    </div>
+                </div>
+                <div class="savings-col">
+                    <div class="period">Lifetime</div>
+                    <div class="savings-metrics">
+                        <div class="savings-metric saved"><div class="label">Solar Saved</div><div class="value">$<span id="life-solar-savings">--</span></div></div>
+                        <div class="savings-metric saved"><div class="label">Battery Saved</div><div class="value">$<span id="life-battery-savings">--</span></div></div>
+                        <div class="savings-metric cost"><div class="label">Grid Cost</div><div class="value">$<span id="life-grid-cost">--</span></div></div>
+                        <div class="savings-metric saved"><div class="label">Total Saved</div><div class="value">$<span id="life-total-savings">--</span></div></div>
+                    </div>
+                </div>
+            </div>
         </div>
         <div class="battery-grid" id="battery-grid"></div>
         <div class="last-update">Last updated: <span id="timestamp">--</span></div>
@@ -242,8 +290,24 @@ class WebServer:
                 document.getElementById('timestamp').textContent = batteries.length && batteries[0].timestamp ? new Date(batteries[0].timestamp).toLocaleString() : '--';
             }).catch(e=>console.error(e));
         }
+        function updateSavings() {
+            fetch('/api/savings').then(r=>r.json()).then(data=>{
+                document.getElementById('savings-section').style.display = data.enabled ? '' : 'none';
+                if (!data.enabled) return;
+                document.getElementById('today-solar-savings').textContent = data.today.solar_savings.toFixed(2);
+                document.getElementById('today-battery-savings').textContent = data.today.battery_savings.toFixed(2);
+                document.getElementById('today-grid-cost').textContent = data.today.grid_cost.toFixed(2);
+                document.getElementById('today-total-savings').textContent = data.today.total_savings.toFixed(2);
+                document.getElementById('life-solar-savings').textContent = data.lifetime.solar_savings.toFixed(2);
+                document.getElementById('life-battery-savings').textContent = data.lifetime.battery_savings.toFixed(2);
+                document.getElementById('life-grid-cost').textContent = data.lifetime.grid_cost.toFixed(2);
+                document.getElementById('life-total-savings').textContent = data.lifetime.total_savings.toFixed(2);
+            }).catch(e=>console.error(e));
+        }
         updateData();
+        updateSavings();
         setInterval(updateData, 5000);
+        setInterval(updateSavings, 30000);
     </script>
 </body>
 </html>'''

@@ -9,6 +9,8 @@ from typing import Optional, List, Dict
 from .config import Config
 from .battery import BatteryData, EG4ModbusReader, estimate_hours_to_target
 from .canip import CANIPReader
+from .energy_ledger import EnergyLedger
+from .homeassistant import HomeAssistantClient
 from .modbus_server import VirtualModbusServer, aggregate
 from .mqtt import MQTTPublisher
 from .ui import TerminalUI, HeadlessUI
@@ -54,6 +56,21 @@ class BatteryMonitor:
                 host=config.modbus_server_host,
                 port=config.modbus_server_port,
             )
+
+        # Initialize Home Assistant energy savings tracking if enabled
+        self.ha_client: Optional[HomeAssistantClient] = None
+        self.energy_ledger: Optional[EnergyLedger] = None
+        if config.ha_enabled:
+            self.ha_client = HomeAssistantClient(
+                url=config.ha_url,
+                token=config.ha_token,
+                pv_entity=config.ha_pv_entity,
+                grid_entity=config.ha_grid_entity,
+                rate_entity=config.ha_rate_entity,
+            )
+            self.energy_ledger = EnergyLedger(db_path=config.energy_db_path)
+            if self.web:
+                self.web.energy_ledger = self.energy_ledger
     
     def start(self):
         """Start the battery monitor."""
@@ -120,7 +137,19 @@ class BatteryMonitor:
         # Publish aggregated data to its own MQTT topic
         self.mqtt.publish_aggregate(all_data)
 
-        pack_time_to_low_hours = aggregate(all_data, self.config.low_soc_cutoff).get("time_to_low_hours")
+        agg = aggregate(all_data, self.config.low_soc_cutoff)
+        pack_time_to_low_hours = agg.get("time_to_low_hours")
+
+        # Record solar/battery/grid energy flow for the savings dashboard
+        if self.ha_client and self.energy_ledger:
+            snapshot = self.ha_client.get_snapshot()
+            self.energy_ledger.record(
+                pv_power=snapshot.pv_power,
+                grid_power=snapshot.grid_power,
+                battery_power=agg.get("power", 0.0),
+                rate=snapshot.rate,
+                interval_seconds=self.config.poll_interval,
+            )
 
         # Update web server data
         if self.web:
@@ -144,6 +173,8 @@ class BatteryMonitor:
             self.web.stop()
         if self.modbus_server:
             self.modbus_server.stop()
+        if self.energy_ledger:
+            self.energy_ledger.close()
         logger.info("Battery monitor stopped")
     
     def poll_once(self) -> List[BatteryData]:
