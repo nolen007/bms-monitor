@@ -48,6 +48,7 @@ class BatteryMonitor:
                 host=config.web_host,
                 port=config.web_port,
                 low_soc_cutoff=config.low_soc_cutoff,
+                ha_circuits=config.ha_circuits,
             )
         
         # Initialize virtual Modbus server if enabled
@@ -67,6 +68,7 @@ class BatteryMonitor:
                 pv_entity=config.ha_pv_entity,
                 grid_entity=config.ha_grid_entity,
                 rate_entity=config.ha_rate_entity,
+                ac_charge_mode_entity=config.ha_ac_charge_mode_entity,
             )
             self.energy_ledger = EnergyLedger(db_path=config.energy_db_path)
             if self.web:
@@ -149,7 +151,18 @@ class BatteryMonitor:
                 battery_power=agg.get("power", 0.0),
                 rate=snapshot.rate,
                 interval_seconds=self.config.poll_interval,
+                grid_charging=snapshot.grid_charging,
             )
+
+            # Record any additional tracked circuits (EV charger, AC compressor, ...)
+            for circuit in self.config.ha_circuits:
+                power = self.ha_client.get_power(circuit.entity)
+                self.energy_ledger.record_circuit(
+                    name=circuit.name,
+                    power=power,
+                    rate=snapshot.rate,
+                    interval_seconds=self.config.poll_interval,
+                )
 
         # Update web server data
         if self.web:

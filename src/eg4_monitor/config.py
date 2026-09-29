@@ -26,6 +26,15 @@ class BatteryConfig:
 
 
 @dataclass
+class CircuitConfig:
+    """A single Home Assistant entity tracked for cost (kWh x live rate)."""
+    name: str
+    entity: str
+    # Marks the "whole home" circuit, if any — gets a monthly bill projection
+    is_main: bool = False
+
+
+@dataclass
 class Config:
     """Configuration settings for the battery monitor."""
     
@@ -65,9 +74,13 @@ class Config:
     ha_pv_entity: str = ""
     ha_grid_entity: str = ""
     ha_rate_entity: str = "input_number.electricity_rate"
+    ha_ac_charge_mode_entity: str = ""
+    ha_circuits: list = None
     energy_db_path: str = "energy_ledger.db"
 
     def __post_init__(self):
+        if self.ha_circuits is None:
+            self.ha_circuits = []
         if self.batteries is None:
             # Default single battery for backwards compatibility
             self.batteries = [BatteryConfig()]
@@ -114,6 +127,8 @@ class Config:
         config.ha_pv_entity = ""
         config.ha_grid_entity = ""
         config.ha_rate_entity = "input_number.electricity_rate"
+        config.ha_ac_charge_mode_entity = ""
+        config.ha_circuits = []
         config.energy_db_path = "energy_ledger.db"
         
         # Battery settings - support both old single-battery and new multi-battery format
@@ -184,7 +199,16 @@ class Config:
             config.ha_pv_entity = ha.get("pv_entity", config.ha_pv_entity)
             config.ha_grid_entity = ha.get("grid_entity", config.ha_grid_entity)
             config.ha_rate_entity = ha.get("rate_entity", config.ha_rate_entity)
+            config.ha_ac_charge_mode_entity = ha.get("ac_charge_mode_entity", config.ha_ac_charge_mode_entity)
             config.energy_db_path = ha.get("db_path", config.energy_db_path)
+            config.ha_circuits = [
+                CircuitConfig(
+                    name=c["name"],
+                    entity=c["entity"],
+                    is_main=c.get("is_main", False),
+                )
+                for c in ha.get("circuits", [])
+            ]
 
         return config
     
@@ -254,7 +278,12 @@ class Config:
                 "pv_entity": self.ha_pv_entity,
                 "grid_entity": self.ha_grid_entity,
                 "rate_entity": self.ha_rate_entity,
+                "ac_charge_mode_entity": self.ha_ac_charge_mode_entity,
                 "db_path": self.energy_db_path,
+                "circuits": [
+                    {"name": c.name, "entity": c.entity, "is_main": c.is_main}
+                    for c in self.ha_circuits
+                ],
             },
         }
 

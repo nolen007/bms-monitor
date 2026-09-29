@@ -19,10 +19,11 @@ logger = logging.getLogger(__name__)
 class WebServer:
     """Flask web server for battery monitoring GUI."""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 5000, low_soc_cutoff: float = 0.0):
+    def __init__(self, host: str = "0.0.0.0", port: int = 5000, low_soc_cutoff: float = 0.0, ha_circuits: list = None):
         self.host = host
         self.port = port
         self.low_soc_cutoff = low_soc_cutoff
+        self.ha_circuits = ha_circuits or []
         self.app = Flask(__name__)
         self.batteries: List[BatteryData] = []
         self.mqtt_connected: bool = False
@@ -54,15 +55,30 @@ class WebServer:
         })
 
     def _api_savings(self):
-        """Return today's and lifetime solar/battery savings vs. grid cost."""
+        """Return today's/lifetime solar/battery savings, grid cost, and tracked circuits."""
         if not self.energy_ledger:
             return jsonify({'enabled': False})
+
+        circuits = []
+        for c in self.ha_circuits:
+            entry = {
+                'name': c.name,
+                'is_main': c.is_main,
+                'today': self.energy_ledger.circuit_totals_today(c.name).to_dict(),
+                'this_month': self.energy_ledger.circuit_totals_this_month(c.name).to_dict(),
+                'lifetime': self.energy_ledger.circuit_totals_lifetime(c.name).to_dict(),
+                'current_power': (self.energy_ledger.circuit_latest(c.name) or {}).get('power'),
+            }
+            if c.is_main:
+                entry['monthly_bill_estimate'] = self.energy_ledger.monthly_bill_estimate(c.name)
+            circuits.append(entry)
 
         return jsonify({
             'enabled': True,
             'today': self.energy_ledger.totals_today().to_dict(),
             'lifetime': self.energy_ledger.totals_lifetime().to_dict(),
             'current': self.energy_ledger.latest(),
+            'circuits': circuits,
         })
 
     def update_data(self, batteries: List[BatteryData], mqtt_connected: bool = False, pack_time_to_low_hours: float = None):
@@ -164,6 +180,10 @@ class WebServer:
         .savings-metric .value { font-size: 1.3em; font-weight: 600; }
         .savings-metric.saved .value { color: #00ff88; }
         .savings-metric.cost .value { color: #ffaa00; }
+        .circuit-col .period { display: flex; justify-content: space-between; align-items: center; }
+        .bill-estimate { text-align: center; background: rgba(0,212,255,0.1); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+        .bill-estimate .label { font-size: 0.7em; color: #888; }
+        .bill-estimate .value { font-size: 1.8em; font-weight: 700; color: #00d4ff; }
         
         /* Tablet */
         @media (max-width: 1024px) {
@@ -224,6 +244,7 @@ class WebServer:
                     <div class="savings-metric"><div class="label">Grid Power</div><div class="value"><span id="in-grid-power">--</span><span class="unit" style="font-size:0.6em"> W</span></div></div>
                     <div class="savings-metric"><div class="label">Battery Power</div><div class="value"><span id="in-battery-power">--</span><span class="unit" style="font-size:0.6em"> W</span></div></div>
                     <div class="savings-metric"><div class="label">Rate</div><div class="value">$<span id="in-rate">--</span><span class="unit" style="font-size:0.6em">/kWh</span></div></div>
+                    <div class="savings-metric"><div class="label">Grid Charging</div><div class="value" id="in-grid-charging">--</div></div>
                 </div>
             </div>
             <div class="savings-columns">
@@ -231,8 +252,9 @@ class WebServer:
                     <div class="period">Today</div>
                     <div class="savings-metrics">
                         <div class="savings-metric saved"><div class="label">Solar Saved</div><div class="value">$<span id="today-solar-savings">--</span></div></div>
-                        <div class="savings-metric saved"><div class="label">Battery Saved</div><div class="value">$<span id="today-battery-savings">--</span></div></div>
+                        <div class="savings-metric saved"><div class="label">Battery Saved (net)</div><div class="value">$<span id="today-battery-savings">--</span></div></div>
                         <div class="savings-metric cost"><div class="label">Grid Cost</div><div class="value">$<span id="today-grid-cost">--</span></div></div>
+                        <div class="savings-metric cost"><div class="label">Grid Charging Cost</div><div class="value">$<span id="today-grid-charge-cost">--</span></div></div>
                         <div class="savings-metric saved"><div class="label">Total Saved</div><div class="value">$<span id="today-total-savings">--</span></div></div>
                     </div>
                 </div>
@@ -240,12 +262,17 @@ class WebServer:
                     <div class="period">Lifetime</div>
                     <div class="savings-metrics">
                         <div class="savings-metric saved"><div class="label">Solar Saved</div><div class="value">$<span id="life-solar-savings">--</span></div></div>
-                        <div class="savings-metric saved"><div class="label">Battery Saved</div><div class="value">$<span id="life-battery-savings">--</span></div></div>
+                        <div class="savings-metric saved"><div class="label">Battery Saved (net)</div><div class="value">$<span id="life-battery-savings">--</span></div></div>
                         <div class="savings-metric cost"><div class="label">Grid Cost</div><div class="value">$<span id="life-grid-cost">--</span></div></div>
+                        <div class="savings-metric cost"><div class="label">Grid Charging Cost</div><div class="value">$<span id="life-grid-charge-cost">--</span></div></div>
                         <div class="savings-metric saved"><div class="label">Total Saved</div><div class="value">$<span id="life-total-savings">--</span></div></div>
                     </div>
                 </div>
             </div>
+        </div>
+        <div class="savings-section circuits-section" id="circuits-section" style="display:none">
+            <h2>🔌 Tracked Circuits</h2>
+            <div class="savings-columns" id="circuits-grid"></div>
         </div>
         <div class="battery-grid" id="battery-grid"></div>
         <div class="last-update">Last updated: <span id="timestamp">--</span></div>
@@ -300,24 +327,44 @@ class WebServer:
                 document.getElementById('timestamp').textContent = batteries.length && batteries[0].timestamp ? new Date(batteries[0].timestamp).toLocaleString() : '--';
             }).catch(e=>console.error(e));
         }
+        function createCircuitCard(c) {
+            const bill = c.monthly_bill_estimate != null
+                ? `<div class="bill-estimate"><div class="label">Projected Monthly Bill</div><div class="value">$${c.monthly_bill_estimate.toFixed(2)}</div></div>`
+                : '';
+            return `<div class="savings-col circuit-col">
+                <div class="period"><span>${c.name}</span><span>${c.current_power!=null?c.current_power.toFixed(0)+' W':'--'}</span></div>
+                ${bill}
+                <div class="savings-metrics">
+                    <div class="savings-metric cost"><div class="label">Today</div><div class="value">$${c.today.cost.toFixed(2)}</div></div>
+                    <div class="savings-metric cost"><div class="label">This Month</div><div class="value">$${c.this_month.cost.toFixed(2)}</div></div>
+                    <div class="savings-metric"><div class="label">Today kWh</div><div class="value">${c.today.kwh.toFixed(2)}</div></div>
+                    <div class="savings-metric"><div class="label">Month kWh</div><div class="value">${c.this_month.kwh.toFixed(2)}</div></div>
+                </div>
+            </div>`;
+        }
         function updateSavings() {
             fetch('/api/savings').then(r=>r.json()).then(data=>{
                 document.getElementById('savings-section').style.display = data.enabled ? '' : 'none';
+                document.getElementById('circuits-section').style.display = data.enabled && data.circuits && data.circuits.length ? '' : 'none';
                 if (!data.enabled) return;
                 document.getElementById('today-solar-savings').textContent = data.today.solar_savings.toFixed(2);
                 document.getElementById('today-battery-savings').textContent = data.today.battery_savings.toFixed(2);
                 document.getElementById('today-grid-cost').textContent = data.today.grid_cost.toFixed(2);
+                document.getElementById('today-grid-charge-cost').textContent = data.today.grid_charge_cost.toFixed(2);
                 document.getElementById('today-total-savings').textContent = data.today.total_savings.toFixed(2);
                 document.getElementById('life-solar-savings').textContent = data.lifetime.solar_savings.toFixed(2);
                 document.getElementById('life-battery-savings').textContent = data.lifetime.battery_savings.toFixed(2);
                 document.getElementById('life-grid-cost').textContent = data.lifetime.grid_cost.toFixed(2);
+                document.getElementById('life-grid-charge-cost').textContent = data.lifetime.grid_charge_cost.toFixed(2);
                 document.getElementById('life-total-savings').textContent = data.lifetime.total_savings.toFixed(2);
                 const cur = data.current;
                 document.getElementById('in-pv-power').textContent = cur?.pv_power?.toFixed(0) ?? '--';
                 document.getElementById('in-grid-power').textContent = cur?.grid_power?.toFixed(0) ?? '--';
                 document.getElementById('in-battery-power').textContent = cur?.battery_power?.toFixed(0) ?? '--';
                 document.getElementById('in-rate').textContent = cur?.rate?.toFixed(4) ?? '--';
+                document.getElementById('in-grid-charging').textContent = cur ? (cur.grid_charging ? 'Yes' : 'No') : '--';
                 document.getElementById('inputs-asof').textContent = cur?.timestamp ? '(' + new Date(cur.timestamp).toLocaleTimeString() + ')' : '';
+                document.getElementById('circuits-grid').innerHTML = (data.circuits || []).map(createCircuitCard).join('');
             }).catch(e=>console.error(e));
         }
         updateData();

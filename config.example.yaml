@@ -80,7 +80,23 @@ home_assistant:
   pv_entity: "sensor.inverter_pv_total_power"
   grid_entity: "sensor.inverter_grid_power"
   rate_entity: "input_number.electricity_rate"
+  # Switch/select that's "on" when the inverter is actively charging the
+  # battery from grid power (vs. solar surplus) — used to deduct that
+  # cost from Battery Savings instead of double-counting it as savings.
+  ac_charge_mode_entity: "switch.inverter_ac_charge_mode"
   db_path: "energy_ledger.db"
+  # Arbitrary extra circuits to track cost for (kWh x live rate each poll).
+  # Mark exactly one is_main: true to get a projected-monthly-bill card —
+  # typically your whole-home main panel sensor, not the inverter's grid
+  # sensor above (which may only cover a subpanel).
+  circuits:
+    - name: "Whole Home"
+      entity: "sensor.main_panel_power_minute_average"
+      is_main: true
+    - name: "EV Charger"
+      entity: "sensor.ev_charger_power_minute_average"
+    - name: "AC Compressor"
+      entity: "sensor.ac_compressor_power_minute_average"
 
 # Virtual Modbus TCP Server — Solar Assistant gateway
 # Exposes all batteries as a single combined Pylontech-compatible Modbus device.

@@ -2,6 +2,8 @@
 Tests for the energy ledger: energy/cost accumulation and rollups.
 """
 
+import calendar
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -63,6 +65,50 @@ class TestRecord:
         assert totals.solar_savings == pytest.approx(0.90)
 
 
+class TestGridChargingDeduction:
+
+    def test_charging_while_grid_charging_costs_money(self, ledger):
+        # 2000W charging for 1 hour at $0.30/kWh, sourced from grid
+        ledger.record(
+            pv_power=0.0, grid_power=2000.0, battery_power=2000.0,
+            rate=0.30, interval_seconds=3600, grid_charging=True,
+        )
+        totals = ledger.totals_lifetime()
+        assert totals.battery_charge_kwh == pytest.approx(2.0)
+        assert totals.grid_charge_cost == pytest.approx(0.60)
+        assert totals.battery_savings == pytest.approx(-0.60)
+
+    def test_charging_from_solar_surplus_costs_nothing(self, ledger):
+        # Same charge power, but NOT in grid-charge mode -> no deduction
+        ledger.record(
+            pv_power=2000.0, grid_power=0.0, battery_power=1500.0,
+            rate=0.30, interval_seconds=3600, grid_charging=False,
+        )
+        totals = ledger.totals_lifetime()
+        assert totals.battery_charge_kwh == 0.0
+        assert totals.grid_charge_cost == 0.0
+        assert totals.battery_savings == 0.0
+        # Solar savings already fully captures the PV production regardless
+        assert totals.solar_savings == pytest.approx(0.60)
+
+    def test_net_battery_savings_over_a_day(self, ledger):
+        # Discharge 1000W for 1h (saves $0.30), then grid-charge 1000W for 1h (costs $0.30)
+        ledger.record(pv_power=0.0, grid_power=0.0, battery_power=-1000.0, rate=0.30, interval_seconds=3600)
+        ledger.record(pv_power=0.0, grid_power=1000.0, battery_power=1000.0, rate=0.30, interval_seconds=3600, grid_charging=True)
+        totals = ledger.totals_lifetime()
+        assert totals.battery_savings == pytest.approx(0.0)
+
+    def test_discharge_unaffected_by_grid_charging_flag(self, ledger):
+        # grid_charging=True shouldn't matter while actually discharging
+        ledger.record(
+            pv_power=0.0, grid_power=0.0, battery_power=-1000.0,
+            rate=0.30, interval_seconds=3600, grid_charging=True,
+        )
+        totals = ledger.totals_lifetime()
+        assert totals.battery_charge_kwh == 0.0
+        assert totals.battery_savings == pytest.approx(0.30)
+
+
 class TestTotalsSince:
 
     def test_excludes_rows_before_cutoff(self, ledger):
@@ -94,12 +140,13 @@ class TestLatest:
 
     def test_returns_most_recent_raw_inputs(self, ledger):
         ledger.record(pv_power=500.0, grid_power=100.0, battery_power=-200.0, rate=0.10, interval_seconds=30)
-        ledger.record(pv_power=800.0, grid_power=0.0, battery_power=-900.0, rate=0.30, interval_seconds=30)
+        ledger.record(pv_power=800.0, grid_power=0.0, battery_power=-900.0, rate=0.30, interval_seconds=30, grid_charging=True)
         latest = ledger.latest()
         assert latest["pv_power"] == 800.0
         assert latest["grid_power"] == 0.0
         assert latest["battery_power"] == -900.0
         assert latest["rate"] == 0.30
+        assert latest["grid_charging"] is True
         assert "timestamp" in latest
 
     def test_skipped_interval_not_recorded_as_latest(self, ledger):
@@ -107,3 +154,112 @@ class TestLatest:
         ledger.record(pv_power=999.0, grid_power=0.0, battery_power=0.0, rate=None, interval_seconds=30)
         latest = ledger.latest()
         assert latest["pv_power"] == 500.0
+
+
+class TestCircuits:
+
+    def test_record_and_totals(self, ledger):
+        ledger.record_circuit(name="EV Charger", power=7000.0, rate=0.30, interval_seconds=3600)
+        totals = ledger.circuit_totals_lifetime("EV Charger")
+        assert totals.kwh == pytest.approx(7.0)
+        assert totals.cost == pytest.approx(2.10)
+
+    def test_circuits_are_independent(self, ledger):
+        ledger.record_circuit(name="EV Charger", power=7000.0, rate=0.30, interval_seconds=3600)
+        ledger.record_circuit(name="AC Compressor", power=3000.0, rate=0.30, interval_seconds=3600)
+        ev = ledger.circuit_totals_lifetime("EV Charger")
+        ac = ledger.circuit_totals_lifetime("AC Compressor")
+        assert ev.kwh == pytest.approx(7.0)
+        assert ac.kwh == pytest.approx(3.0)
+
+    def test_skipped_when_rate_unknown(self, ledger):
+        ledger.record_circuit(name="EV Charger", power=7000.0, rate=None, interval_seconds=3600)
+        totals = ledger.circuit_totals_lifetime("EV Charger")
+        assert totals.kwh == 0.0
+
+    def test_missing_power_treated_as_zero(self, ledger):
+        ledger.record_circuit(name="EV Charger", power=None, rate=0.30, interval_seconds=3600)
+        totals = ledger.circuit_totals_lifetime("EV Charger")
+        assert totals.kwh == 0.0
+
+    def test_unknown_circuit_returns_zero_totals(self, ledger):
+        ledger.record_circuit(name="EV Charger", power=7000.0, rate=0.30, interval_seconds=3600)
+        totals = ledger.circuit_totals_lifetime("Nonexistent")
+        assert totals.kwh == 0.0
+        assert totals.cost == 0.0
+
+    def test_circuit_latest(self, ledger):
+        ledger.record_circuit(name="EV Charger", power=1000.0, rate=0.30, interval_seconds=30)
+        ledger.record_circuit(name="EV Charger", power=7000.0, rate=0.30, interval_seconds=30)
+        latest = ledger.circuit_latest("EV Charger")
+        assert latest["power"] == 7000.0
+
+    def test_circuit_latest_none_when_empty(self, ledger):
+        assert ledger.circuit_latest("EV Charger") is None
+
+
+class TestMonthlyBillEstimate:
+
+    def test_none_when_no_data(self, ledger):
+        assert ledger.monthly_bill_estimate("Whole Home") is None
+
+    def test_projects_using_days_elapsed_and_days_in_month(self, ledger):
+        ledger.record_circuit(name="Whole Home", power=1000.0, rate=0.30, interval_seconds=3600)
+        estimate = ledger.monthly_bill_estimate("Whole Home")
+
+        now = datetime.now().astimezone()
+        days_elapsed = max(1, now.day)
+        days_in_month = calendar.monthrange(now.year, now.month)[1]
+        expected = (1.0 * 0.30) / days_elapsed * days_in_month
+
+        assert estimate == pytest.approx(expected)
+
+    def test_different_circuits_estimated_independently(self, ledger):
+        ledger.record_circuit(name="Whole Home", power=1000.0, rate=0.30, interval_seconds=3600)
+        assert ledger.monthly_bill_estimate("EV Charger") is None
+
+
+class TestSchemaMigration:
+
+    def test_opens_pre_migration_database_without_error(self, tmp_path):
+        db_path = str(tmp_path / "legacy.db")
+        # Simulate a database created before grid_charging/battery_charge_kwh/
+        # grid_charge_cost existed.
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """CREATE TABLE energy_log (
+                timestamp TEXT NOT NULL,
+                pv_power REAL,
+                grid_power REAL,
+                battery_power REAL,
+                rate REAL,
+                solar_kwh REAL NOT NULL,
+                grid_kwh REAL NOT NULL,
+                battery_discharge_kwh REAL NOT NULL,
+                grid_cost REAL NOT NULL,
+                solar_savings REAL NOT NULL,
+                battery_savings REAL NOT NULL
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO energy_log (
+                timestamp, pv_power, grid_power, battery_power, rate,
+                solar_kwh, grid_kwh, battery_discharge_kwh,
+                grid_cost, solar_savings, battery_savings
+            ) VALUES ('2026-01-01T00:00:00+00:00', 100, 0, -50, 0.3, 1.0, 0.0, 0.5, 0.0, 0.3, 0.15)"""
+        )
+        conn.commit()
+        conn.close()
+
+        ledger = EnergyLedger(db_path=db_path)
+        try:
+            totals = ledger.totals_lifetime()
+            assert totals.solar_savings == pytest.approx(0.3)
+            assert totals.battery_charge_kwh == 0.0  # migrated column defaults to 0
+
+            # New writes after migration should work normally
+            ledger.record(pv_power=100.0, grid_power=100.0, battery_power=100.0, rate=0.3, interval_seconds=3600, grid_charging=True)
+            totals = ledger.totals_lifetime()
+            assert totals.battery_charge_kwh == pytest.approx(0.1)
+        finally:
+            ledger.close()
