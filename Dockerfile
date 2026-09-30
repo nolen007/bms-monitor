@@ -10,6 +10,11 @@ COPY pyproject.toml .
 COPY config.yaml .
 RUN pip install --no-cache-dir .
 
+# Without this, the container defaults to UTC — every "today"/"this month"
+# boundary in energy_ledger.py comes from datetime.now().astimezone(), so
+# the day rolled over at 7pm/6pm local (UTC midnight) instead of real
+# midnight, zeroing out savings hours before the actual day was over.
+ENV TZ="America/Chicago"
 ENV EG4_BATTERY_IP="192.168.130.139"
 ENV EG4_BATTERY_PORT="4196"
 ENV EG4_DEVICE_ID="1"
